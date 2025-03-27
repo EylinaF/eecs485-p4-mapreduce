@@ -9,8 +9,11 @@ import itertools
 
 
 def reduce_one_group(key, group):
-    """Reduce one group."""
-    assert False, "IMPLEMENT ME"
+    total = 0
+    for line in group:
+        _, _, value = line.partition("\t")
+        total += int(value)
+    print(f"{key}\t{total}")
 
 
 def keyfunc(line):
