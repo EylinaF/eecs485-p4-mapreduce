@@ -3,9 +3,11 @@ import os
 import tempfile
 import logging
 import json
+import socket
 import time
 import click
 import mapreduce.utils
+import threading
 
 
 # Configure logging
@@ -23,18 +25,110 @@ class Manager:
             host, port, os.getcwd(),
         )
 
-        # This is a fake message to demonstrate pretty printing with logging
-        message_dict = {
-            "message_type": "register",
-            "worker_host": "localhost",
-            "worker_port": 6001,
-        }
-        LOGGER.debug("TCP recv\n%s", json.dumps(message_dict, indent=2))
 
         # TODO: you should remove this. This is just so the program doesn't
         # exit immediately!
-        LOGGER.debug("IMPLEMENT ME!")
-        time.sleep(120)
+        prefix = f"mapreduce-shared-"
+        with tempfile.TemporaryDirectory(prefix=prefix) as tmpdir:
+            LOGGER.info("Created tmpdir %s", tmpdir)
+            self.shared_dir = tmpdir
+            self.host = host
+            self.port = port
+            self.registered_workers = set()
+            self.shutdown_event = threading.Event()
+            self.threads = []
+            udp_thread = threading.Thread(target=self.udp_listening)
+            self.threads.append(udp_thread)
+            udp_thread.start()
+            LOGGER.info("started udp thread listener")
+            tcp_thread = threading.Thread(target=self.start_tcp_listener)
+            tcp_thread.start()
+            self.threads.append(tcp_thread)
+            self.shutdown_event.wait()
+            for thread in self.threads:
+                thread.join()
+        LOGGER.info("Cleaned up tmpdir %s", tmpdir)
+
+
+    def udp_listening(self):
+        """Listen for UDP heartbeat messages from workers."""
+
+        # Create a UDP socket
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((self.host, self.port))
+            sock.settimeout(1)
+
+            # Listen for heartbeat messages
+            while not self.shutdown_event.is_set():
+                try:
+                    message_bytes = sock.recv(4096)
+                except socket.timeout:
+                    continue
+                try:
+                    message_str = message_bytes.decode("utf-8")
+                    message_dict = json.loads(message_str)
+                    LOGGER.debug("TCP recv\n%s", json.dumps(message_dict, indent=2))
+                except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                    LOGGER.warning("Invalid UDP message: %s", e)
+                    continue
+    
+    def start_tcp_listener(self):
+        """Start the TCP listener for incoming messages from Workers."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((self.host, self.port))
+            sock.listen()
+            sock.settimeout(1)
+            LOGGER.debug("TCP bind %s:%s", self.host, self.port)
+
+            while not self.shutdown_event.is_set():
+                try:
+                    clientsocket, address = sock.accept()
+                except socket.timeout:
+                    continue
+                LOGGER.debug("Connection from %s", address[0])
+                clientsocket.settimeout(1)
+
+                with clientsocket:
+                    message_chunks = []
+                    while True:
+                        try:
+                            data = clientsocket.recv(4096)
+                        except socket.timeout:
+                            continue
+                        if not data:
+                            break
+                        message_chunks.append(data)
+
+                message_bytes = b"".join(message_chunks)
+                try:
+                    message_str = message_bytes.decode("utf-8")
+                    message_dict = json.loads(message_str)
+                    LOGGER.debug("TCP recv\n%s", json.dumps(message_dict, indent=2))
+                    if message_dict["message_type"] == "register":
+                            worker = (message_dict["worker_host"], message_dict["worker_port"])
+                            self.registered_workers.add(worker)
+                            ack = {"message_type": "register_ack"}
+                            clientsocket.sendall(json.dumps(ack).encode("utf-8"))
+                            LOGGER.info("Registered Worker %s", worker)
+
+                    elif message_dict["message_type"] == "shutdown":
+                        LOGGER.info("Received shutdown message")
+                        shutdown_msg = json.dumps({"message_type": "shutdown"}).encode("utf-8")
+                        for host, port in self.registered_workers:
+                            try:
+                                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                                    sock.connect((host, port))
+                                    sock.sendall(shutdown_msg)
+                                    LOGGER.info("Sent shutdown to Worker %s:%s", host, port)
+                            except Exception as e:
+                                LOGGER.warning("Failed to send shutdown to %s:%s: %s", host, port, e)
+                        self.shutdown_event.set()
+
+                except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                    LOGGER.warning("Invalid TCP message: %s", e)
+                    continue
 
 
 @click.command()
@@ -53,17 +147,6 @@ def main(host, port, logfile, loglevel, shared_dir):
     formatter = logging.Formatter(
         f"Manager:{port} [%(levelname)s] %(message)s"
     )
-    prefix = f"mapreduce-shared-"
-    with tempfile.TemporaryDirectory(prefix=prefix) as tmpdir:
-        LOGGER.info("Created tmpdir %s", tmpdir)
-        udp_thread = threading.Thread(target=udp_listening)
-        udp_thread.start()
-        threads.append(udp_thread)
-        LOGGER.info("started udp thread listener")
-        # FIXME: Add all code needed so that this `with` block doesn't end until the Manager shuts down.
-    LOGGER.info("Cleaned up tmpdir %s", tmpdir)
-
-
     handler.setFormatter(formatter)
     root_logger = logging.getLogger()
     root_logger.addHandler(handler)

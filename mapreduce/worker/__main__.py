@@ -5,7 +5,8 @@ import json
 import time
 import click
 import mapreduce.utils
-
+import threading
+import socket
 
 # Configure logging
 LOGGER = logging.getLogger(__name__)
@@ -34,10 +35,100 @@ class Worker:
 
         # TODO: you should remove this. This is just so the program doesn't
         # exit immediately!
-        LOGGER.debug("IMPLEMENT ME!")
-        time.sleep(120)
+        self.host = host
+        self.port = port
+        self.manager_host = manager_host
+        self.manager_port = manager_port
+        self.shutdown_event = threading.Event()
+        self.threads = []
+        listener_thread = threading.Thread(target=self.start_tcp_listener)
+        listener_thread.start()
+        self.threads.append(listener_thread)
+        self.register()
+        heartbeat_thread = threading.Thread(target=self.send_heartbeats)
+        self.threads.append(heartbeat_thread)
+        heartbeat_thread.start()
+        self.shutdown_event.wait()
+        for thread in self.threads:
+            thread.join()
+        LOGGER.info("Worker shut down")
+
+    def start_tcp_listener(self):
+        """Start the TCP listener for incoming messages from Workers."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((self.host, self.port))
+            sock.listen()
+            sock.settimeout(1)
+            LOGGER.debug("TCP bind %s:%s", self.host, self.port)
+
+            while not self.shutdown_event.is_set():
+                try:
+                    clientsocket, address = sock.accept()
+                except socket.timeout:
+                    continue
+                LOGGER.debug("Connection from %s", address[0])
+                clientsocket.settimeout(1)
+
+                with clientsocket:
+                    message_chunks = []
+                    while True:
+                        try:
+                            data = clientsocket.recv(4096)
+                        except socket.timeout:
+                            continue
+                        if not data:
+                            break
+                        message_chunks.append(data)
+
+                message_bytes = b"".join(message_chunks)
+                try:
+                    message_str = message_bytes.decode("utf-8")
+                    message_dict = json.loads(message_str)
+                    LOGGER.debug("TCP recv\n%s", json.dumps(message_dict, indent=2))
+                    if message_dict.get("message_type") == "shutdown":
+                        self.shutdown_event.set()
+                        LOGGER.info("Worker received shutdown")
+                except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                    LOGGER.warning("Invalid TCP message: %s", e)
+                    continue
+
+    def register(self):
+        """Send register message and wait for register_ack."""
+        msg = {
+            "message_type": "register",
+            "worker_host": self.host,
+            "worker_port": self.port,
+        }
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.connect((self.manager_host, self.manager_port))
+                sock.sendall(json.dumps(msg).encode("utf-8"))
+                sock.settimeout(2)
+                response = sock.recv(4096).decode("utf-8")
+                ack = json.loads(response)
+                LOGGER.debug("Got register_ack %s", ack)
+        except Exception as e:
+            LOGGER.error("Failed to register with Manager: %s", e)
 
 
+    def send_heartbeats(self):
+            """Periodically send heartbeat messages to the Manager via UDP."""
+            msg = {
+                "message_type": "heartbeat",
+                "worker_host": self.host,
+                "worker_port": self.port,
+            }
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                while True:
+                    try:
+                        sock.sendto(json.dumps(msg).encode("utf-8"), (self.manager_host, self.manager_port))
+                        LOGGER.debug("Sent heartbeat to Manager %s:%s", self.manager_host, self.manager_port)
+                        time.sleep(1)
+                    except Exception as e:
+                        LOGGER.warning("Failed to send heartbeat: %s", e)
+
+    
 @click.command()
 @click.option("--host", "host", default="localhost")
 @click.option("--port", "port", default=6001)
