@@ -83,6 +83,9 @@ class Worker:
                         message_chunks.append(data)
 
                     message_bytes = b"".join(message_chunks)
+                    if not message_bytes.strip():
+                        LOGGER.debug("Received empty TCP message, ignoring")
+                        continue
                     try:
                         message_str = message_bytes.decode("utf-8")
                         message_dict = json.loads(message_str)
@@ -90,6 +93,7 @@ class Worker:
                         if message_dict.get("message_type") == "shutdown":
                             LOGGER.info("Worker received shutdown")
                             signals["shutdown"] = True
+                            return
                         if message_dict["message_type"] == "register_ack":
                             signals["registered"] = True
                             LOGGER.info("Worker received register_ack")

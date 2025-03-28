@@ -124,7 +124,7 @@ class Manager:
                                     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                                         sock.connect((host, port))
                                         sock.sendall(shutdown_msg)
-                                        LOGGER.info("Sent shutdown to Worker %s:%s", host, port)
+                                        LOGGER.info("Sent shutdown to Worker %s:%s", host, port)    
                                 except Exception as e:
                                     LOGGER.warning("Failed to send shutdown to %s:%s: %s", host, port, e)
                             signals["shutdown"] = True
