@@ -1,0 +1,104 @@
+#!/bin/bash
+#
+# mapreduce
+#
+# start manager and worker
+
+# Stop on errors, print commands
+# See https://vaneyckt.io/posts/safer_bash_scripts_with_set_euxo_pipefail/
+set -Eeuo pipefail
+set -x
+
+#!/bin/bash
+
+# Paths
+LOGDIR="var/log"
+MANAGER_LOG="$LOGDIR/manager.log"
+WORKER1_LOG="$LOGDIR/worker-6001.log"
+WORKER2_LOG="$LOGDIR/worker-6002.log"
+
+# Detect OS for pgrep/pkill options
+PGREP_OPTS="-f"
+if [[ "$(uname)" == "Darwin" ]]; then
+  PGREP_OPTS="-lf"
+fi
+
+start() {
+    if pgrep $PGREP_OPTS mapreduce-manager > /dev/null || pgrep $PGREP_OPTS mapreduce-worker > /dev/null; then
+        echo "Error: mapreduce-manager is already running"
+        exit 1
+    fi
+
+    echo "starting mapreduce ..."
+    mkdir -p "$LOGDIR"
+    rm -f "$MANAGER_LOG" "$WORKER1_LOG" "$WORKER2_LOG"
+
+    mapreduce-manager --host localhost --port 6000 --logfile "$MANAGER_LOG" &
+    sleep 2
+    mapreduce-worker --host localhost --port 6001 --manager-host localhost --manager-port 6000 --logfile "$WORKER1_LOG" &
+    mapreduce-worker --host localhost --port 6002 --manager-host localhost --manager-port 6000 --logfile "$WORKER2_LOG" &
+}
+
+stop() {
+    echo "stopping mapreduce ..."
+    mapreduce-submit --shutdown --host localhost --port 6000 || true
+    sleep 2
+
+    if pgrep $PGREP_OPTS mapreduce-manager > /dev/null; then
+        echo "killing mapreduce manager ..."
+        pkill $PGREP_OPTS mapreduce-manager || true
+    fi
+    if pgrep $PGREP_OPTS mapreduce-worker > /dev/null; then
+        echo "killing mapreduce worker ..."
+        pkill $PGREP_OPTS mapreduce-worker || true
+    fi
+}
+
+status() {
+    MANAGER_RUNNING=1
+    WORKERS_RUNNING=1
+
+    if pgrep $PGREP_OPTS mapreduce-manager > /dev/null; then
+        echo "manager running"
+        MANAGER_RUNNING=0
+    else
+        echo "manager not running"
+    fi
+
+    if pgrep $PGREP_OPTS mapreduce-worker > /dev/null; then
+        echo "workers running"
+        WORKERS_RUNNING=0
+    else
+        echo "workers not running"
+    fi
+
+    if [[ $MANAGER_RUNNING -eq 0 && $WORKERS_RUNNING -eq 0 ]]; then
+        exit 0
+    else
+        exit 1
+    fi
+}
+
+restart() {
+    stop
+    start
+}
+
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    status)
+        status
+        ;;
+    restart)
+        restart
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|status|restart}"
+        exit 1
+        ;;
+esac

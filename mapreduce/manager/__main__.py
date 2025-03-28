@@ -46,13 +46,24 @@ class Manager:
 def main(host, port, logfile, loglevel, shared_dir):
     """Run Manager."""
     tempfile.tempdir = shared_dir
-    if logfile:
+    if logfile: 
         handler = logging.FileHandler(logfile)
     else:
         handler = logging.StreamHandler()
     formatter = logging.Formatter(
         f"Manager:{port} [%(levelname)s] %(message)s"
     )
+    prefix = f"mapreduce-shared-"
+    with tempfile.TemporaryDirectory(prefix=prefix) as tmpdir:
+        LOGGER.info("Created tmpdir %s", tmpdir)
+        udp_thread = threading.Thread(target=udp_listening)
+        udp_thread.start()
+        threads.append(udp_thread)
+        LOGGER.info("started udp thread listener")
+        # FIXME: Add all code needed so that this `with` block doesn't end until the Manager shuts down.
+    LOGGER.info("Cleaned up tmpdir %s", tmpdir)
+
+
     handler.setFormatter(formatter)
     root_logger = logging.getLogger()
     root_logger.addHandler(handler)
