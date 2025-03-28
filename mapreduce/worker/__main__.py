@@ -26,12 +26,12 @@ class Worker:
         )
 
         # This is a fake message to demonstrate pretty printing with logging
-        message_dict = {
-            "message_type": "register_ack",
-            "worker_host": "localhost",
-            "worker_port": 6001,
-        }
-        LOGGER.debug("TCP recv\n%s", json.dumps(message_dict, indent=2))
+        # message_dict = {
+        #     "message_type": "register_ack",
+        #     "worker_host": "localhost",
+        #     "worker_port": 6001,
+        # }
+        # LOGGER.debug("TCP recv\n%s", json.dumps(message_dict, indent=2))
 
         # TODO: you should remove this. This is just so the program doesn't
         # exit immediately!
@@ -39,7 +39,7 @@ class Worker:
         self.port = port
         self.manager_host = manager_host
         self.manager_port = manager_port
-        signals = {"shutdown": False}
+        signals = {"shutdown": False, "registered": False}
         self.threads = []
         listener_thread = threading.Thread(target=self.start_tcp_listener, args=(signals,))
         listener_thread.start()
@@ -47,13 +47,15 @@ class Worker:
         self.register()
         heartbeat_thread = threading.Thread(target=self.send_heartbeats, args=(signals,))
         self.threads.append(heartbeat_thread)
+        while not signals["registered"] and not signals["shutdown"]:
+            time.sleep(0.1)
         heartbeat_thread.start()
         for thread in self.threads:
             thread.join()
         LOGGER.info("Worker shut down")
 
     def start_tcp_listener(self, signals):
-        """Start the TCP listener for incoming messages from Workers."""
+        """Start the TCP listener for incoming messages from Manager."""
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind((self.host, self.port))
@@ -80,17 +82,20 @@ class Worker:
                             break
                         message_chunks.append(data)
 
-                message_bytes = b"".join(message_chunks)
-                try:
-                    message_str = message_bytes.decode("utf-8")
-                    message_dict = json.loads(message_str)
-                    LOGGER.debug("TCP recv\n%s", json.dumps(message_dict, indent=2))
-                    if message_dict.get("message_type") == "shutdown":
-                        LOGGER.info("Worker received shutdown")
-                        signals["shutdown"] = True
-                except (json.JSONDecodeError, UnicodeDecodeError) as e:
-                    LOGGER.warning("Invalid TCP message: %s", e)
-                    continue
+                    message_bytes = b"".join(message_chunks)
+                    try:
+                        message_str = message_bytes.decode("utf-8")
+                        message_dict = json.loads(message_str)
+                        LOGGER.debug("TCP recv\n%s", json.dumps(message_dict, indent=2))
+                        if message_dict.get("message_type") == "shutdown":
+                            LOGGER.info("Worker received shutdown")
+                            signals["shutdown"] = True
+                        if message_dict["message_type"] == "register_ack":
+                            signals["registered"] = True
+                            LOGGER.info("Worker received register_ack")
+                    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                        LOGGER.warning("Invalid TCP message: %s", e)
+                        continue
 
     def register(self):
         """Send register message and wait for register_ack."""
@@ -103,29 +108,26 @@ class Worker:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                 sock.connect((self.manager_host, self.manager_port))
                 sock.sendall(json.dumps(msg).encode("utf-8"))
-                sock.settimeout(2)
-                response = sock.recv(4096).decode("utf-8")
-                ack = json.loads(response)
-                LOGGER.debug("Got register_ack %s", ack)
+                LOGGER.debug("Sent Register")
         except Exception as e:
             LOGGER.error("Failed to register with Manager: %s", e)
 
 
     def send_heartbeats(self, signals):
-            """Periodically send heartbeat messages to the Manager via UDP."""
-            msg = {
-                "message_type": "heartbeat",
-                "worker_host": self.host,
-                "worker_port": self.port,
-            }
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                while not signals["shutdown"]:
-                    try:
-                        sock.sendto(json.dumps(msg).encode("utf-8"), (self.manager_host, self.manager_port))
-                        LOGGER.debug("Sent heartbeat to Manager %s:%s", self.manager_host, self.manager_port)
-                        time.sleep(1)
-                    except Exception as e:
-                        LOGGER.warning("Failed to send heartbeat: %s", e)
+        """Periodically send heartbeat messages to the Manager via UDP."""
+        msg = {
+            "message_type": "heartbeat",
+            "worker_host": self.host,
+            "worker_port": self.port,
+        }
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            while not signals["shutdown"]:
+                try:
+                    sock.sendto(json.dumps(msg).encode("utf-8"), (self.manager_host, self.manager_port))
+                    LOGGER.debug("Sent heartbeat to Manager %s:%s", self.manager_host, self.manager_port)
+                    time.sleep(1)
+                except Exception as e:
+                    LOGGER.warning("Failed to send heartbeat: %s", e)
 
     
 @click.command()

@@ -42,8 +42,8 @@ class Manager:
             udp_thread.start()
             LOGGER.info("started udp thread listener")
             tcp_thread = threading.Thread(target=self.start_tcp_listener, args=(signals,))
-            tcp_thread.start()
             self.threads.append(tcp_thread)
+            tcp_thread.start()
             for thread in self.threads:
                 thread.join()
         LOGGER.info("Cleaned up tmpdir %s", tmpdir)
@@ -100,34 +100,38 @@ class Manager:
                             break
                         message_chunks.append(data)
 
-                message_bytes = b"".join(message_chunks)
-                try:
-                    message_str = message_bytes.decode("utf-8")
-                    message_dict = json.loads(message_str)
-                    LOGGER.debug("TCP recv\n%s", json.dumps(message_dict, indent=2))
-                    if message_dict["message_type"] == "register":
-                            worker = (message_dict["worker_host"], message_dict["worker_port"])
-                            self.registered_workers.add(worker)
-                            ack = {"message_type": "register_ack"}
-                            clientsocket.sendall(json.dumps(ack).encode("utf-8"))
-                            LOGGER.info("Registered Worker %s", worker)
-
-                    elif message_dict["message_type"] == "shutdown":
-                        LOGGER.info("Received shutdown message")
-                        shutdown_msg = json.dumps({"message_type": "shutdown"}).encode("utf-8")
-                        for host, port in self.registered_workers:
-                            try:
+                    message_bytes = b"".join(message_chunks)
+                    try:
+                        message_str = message_bytes.decode("utf-8")
+                        message_dict = json.loads(message_str)
+                        LOGGER.debug("TCP recv\n%s", json.dumps(message_dict, indent=2))
+                        if message_dict["message_type"] == "register":
+                                worker = (message_dict["worker_host"], message_dict["worker_port"])
+                                self.registered_workers.add(worker)
+                                ack = {"message_type": "register_ack"}
+                                LOGGER.info("Sending register_ack to %s", worker)
                                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                                    sock.connect((host, port))
-                                    sock.sendall(shutdown_msg)
-                                    LOGGER.info("Sent shutdown to Worker %s:%s", host, port)
-                            except Exception as e:
-                                LOGGER.warning("Failed to send shutdown to %s:%s: %s", host, port, e)
-                        signals["shutdown"] = True
+                                    sock.connect(worker)
+                                    sock.sendall(json.dumps(ack).encode("utf-8"))
+                                    LOGGER.info("Sent register_ack to %s", worker)
+                                LOGGER.info("Registered Worker %s", worker)
 
-                except (json.JSONDecodeError, UnicodeDecodeError) as e:
-                    LOGGER.warning("Invalid TCP message: %s", e)
-                    continue
+                        elif message_dict["message_type"] == "shutdown":
+                            LOGGER.info("Received shutdown message")
+                            shutdown_msg = json.dumps({"message_type": "shutdown"}).encode("utf-8")
+                            for host, port in self.registered_workers:
+                                try:
+                                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                                        sock.connect((host, port))
+                                        sock.sendall(shutdown_msg)
+                                        LOGGER.info("Sent shutdown to Worker %s:%s", host, port)
+                                except Exception as e:
+                                    LOGGER.warning("Failed to send shutdown to %s:%s: %s", host, port, e)
+                            signals["shutdown"] = True
+
+                    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                        LOGGER.warning("Invalid TCP message: %s", e)
+                        continue
 
 
 @click.command()
