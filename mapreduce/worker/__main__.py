@@ -39,21 +39,20 @@ class Worker:
         self.port = port
         self.manager_host = manager_host
         self.manager_port = manager_port
-        self.shutdown_event = threading.Event()
+        signals = {"shutdown": False}
         self.threads = []
-        listener_thread = threading.Thread(target=self.start_tcp_listener)
+        listener_thread = threading.Thread(target=self.start_tcp_listener, args=(signals,))
         listener_thread.start()
         self.threads.append(listener_thread)
         self.register()
-        heartbeat_thread = threading.Thread(target=self.send_heartbeats)
+        heartbeat_thread = threading.Thread(target=self.send_heartbeats, args=(signals,))
         self.threads.append(heartbeat_thread)
         heartbeat_thread.start()
-        self.shutdown_event.wait()
         for thread in self.threads:
             thread.join()
         LOGGER.info("Worker shut down")
 
-    def start_tcp_listener(self):
+    def start_tcp_listener(self, signals):
         """Start the TCP listener for incoming messages from Workers."""
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -62,7 +61,7 @@ class Worker:
             sock.settimeout(1)
             LOGGER.debug("TCP bind %s:%s", self.host, self.port)
 
-            while not self.shutdown_event.is_set():
+            while not signals["shutdown"]:
                 try:
                     clientsocket, address = sock.accept()
                 except socket.timeout:
@@ -87,8 +86,8 @@ class Worker:
                     message_dict = json.loads(message_str)
                     LOGGER.debug("TCP recv\n%s", json.dumps(message_dict, indent=2))
                     if message_dict.get("message_type") == "shutdown":
-                        self.shutdown_event.set()
                         LOGGER.info("Worker received shutdown")
+                        signals["shutdown"] = True
                 except (json.JSONDecodeError, UnicodeDecodeError) as e:
                     LOGGER.warning("Invalid TCP message: %s", e)
                     continue
@@ -112,7 +111,7 @@ class Worker:
             LOGGER.error("Failed to register with Manager: %s", e)
 
 
-    def send_heartbeats(self):
+    def send_heartbeats(self, signals):
             """Periodically send heartbeat messages to the Manager via UDP."""
             msg = {
                 "message_type": "heartbeat",
@@ -120,7 +119,7 @@ class Worker:
                 "worker_port": self.port,
             }
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                while True:
+                while not signals["shutdown"]:
                     try:
                         sock.sendto(json.dumps(msg).encode("utf-8"), (self.manager_host, self.manager_port))
                         LOGGER.debug("Sent heartbeat to Manager %s:%s", self.manager_host, self.manager_port)

@@ -35,22 +35,21 @@ class Manager:
             self.host = host
             self.port = port
             self.registered_workers = set()
-            self.shutdown_event = threading.Event()
+            signals = {"shutdown": False}
             self.threads = []
-            udp_thread = threading.Thread(target=self.udp_listening)
+            udp_thread = threading.Thread(target=self.udp_listening, args=(signals,))
             self.threads.append(udp_thread)
             udp_thread.start()
             LOGGER.info("started udp thread listener")
-            tcp_thread = threading.Thread(target=self.start_tcp_listener)
+            tcp_thread = threading.Thread(target=self.start_tcp_listener, args=(signals,))
             tcp_thread.start()
             self.threads.append(tcp_thread)
-            self.shutdown_event.wait()
             for thread in self.threads:
                 thread.join()
         LOGGER.info("Cleaned up tmpdir %s", tmpdir)
 
 
-    def udp_listening(self):
+    def udp_listening(self, signals):
         """Listen for UDP heartbeat messages from workers."""
 
         # Create a UDP socket
@@ -60,7 +59,7 @@ class Manager:
             sock.settimeout(1)
 
             # Listen for heartbeat messages
-            while not self.shutdown_event.is_set():
+            while not signals["shutdown"]:
                 try:
                     message_bytes = sock.recv(4096)
                 except socket.timeout:
@@ -73,7 +72,7 @@ class Manager:
                     LOGGER.warning("Invalid UDP message: %s", e)
                     continue
     
-    def start_tcp_listener(self):
+    def start_tcp_listener(self, signals):
         """Start the TCP listener for incoming messages from Workers."""
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -82,7 +81,7 @@ class Manager:
             sock.settimeout(1)
             LOGGER.debug("TCP bind %s:%s", self.host, self.port)
 
-            while not self.shutdown_event.is_set():
+            while not signals["shutdown"]:
                 try:
                     clientsocket, address = sock.accept()
                 except socket.timeout:
@@ -124,7 +123,7 @@ class Manager:
                                     LOGGER.info("Sent shutdown to Worker %s:%s", host, port)
                             except Exception as e:
                                 LOGGER.warning("Failed to send shutdown to %s:%s: %s", host, port, e)
-                        self.shutdown_event.set()
+                        signals["shutdown"] = True
 
                 except (json.JSONDecodeError, UnicodeDecodeError) as e:
                     LOGGER.warning("Invalid TCP message: %s", e)
