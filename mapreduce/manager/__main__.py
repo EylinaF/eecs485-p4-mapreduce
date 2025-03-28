@@ -36,6 +36,7 @@ class Manager:
             self.port = port
             self.registered_workers = set()
             signals = {"shutdown": False}
+            self.worker_states = {}
             self.threads = []
             udp_thread = threading.Thread(target=self.udp_listening, args=(signals,))
             self.threads.append(udp_thread)
