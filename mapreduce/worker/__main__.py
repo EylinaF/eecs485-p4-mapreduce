@@ -8,6 +8,8 @@ import mapreduce.utils
 import threading
 import socket
 
+from mapreduce.worker.mapping import handle_map_task
+
 # Configure logging
 LOGGER = logging.getLogger(__name__)
 
@@ -97,6 +99,10 @@ class Worker:
                         if message_dict["message_type"] == "register_ack":
                             signals["registered"] = True
                             LOGGER.info("Worker received register_ack")
+                        if message_dict["message_type"] == "new_map_task":
+                            threading.Thread(
+                                target=self.handle_map_task,
+                                args=(message_dict,)).start()
                     except (json.JSONDecodeError, UnicodeDecodeError) as e:
                         LOGGER.warning("Invalid TCP message: %s", e)
                         continue
