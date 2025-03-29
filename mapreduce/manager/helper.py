@@ -44,38 +44,63 @@ class JobManager:
 
         return job_id
 
+    
     def run_job(self):
-        """
-        Run a MapReduce job if the queue is not empty.
-        Ensures jobs are executed sequentially.
-        """
         if self.current_job:
             LOGGER.info("A job is already running. Waiting for completion.")
-            return  # Do not run multiple jobs at once
+            return
 
         if self.job_queue.empty():
             LOGGER.info("No jobs in the queue.")
             return
 
-        # Get the next job
         job = self.job_queue.get()
         self.current_job = job
         job_id = job["job_id"]
-        output_dir = job["output_directory"]
         intermediate_dir = os.path.join(self.shared_dir, f"job-{job_id:05d}")
 
-        # Step 1: Delete existing output directory if it exists
-        if os.path.exists(output_dir):
-            shutil.rmtree(output_dir)
-        os.makedirs(output_dir)
-
-        # Step 2: Create intermediate directory
+        # Setup directories
+        if os.path.exists(job["output_directory"]):
+            shutil.rmtree(job["output_directory"])
+        os.makedirs(job["output_directory"], exist_ok=True)
         os.makedirs(intermediate_dir, exist_ok=True)
 
-        LOGGER.info(f"Job {job_id} started: Intermediate dir -> {intermediate_dir}")
+        # Generate map tasks
+        self.current_job_tasks = self._create_map_tasks(job, intermediate_dir)
+        LOGGER.info(f"Job {job_id} created {len(self.current_job_tasks)} map tasks.")
+        return
 
-        # TODO: Implement logic to assign work to workers.
+    def _create_map_tasks(self, job, intermediate_dir):
+        input_dir = job["input_directory"]
+        num_mappers = job["num_mappers"]
+        num_reducers = job["num_reducers"]
 
-        # Mark job as complete (for now, just log it)
-        LOGGER.info(f"Job {job_id} completed.")
-        self.current_job = None
+        # List and sort input files lexicographically
+        input_files = sorted([
+            os.path.join(input_dir, f)
+            for f in os.listdir(input_dir)
+            if os.path.isfile(os.path.join(input_dir, f))
+        ], key=lambda x: os.path.basename(x))
+
+        # Partition files using round-robin
+        partitions = [[] for _ in range(num_mappers)]
+        for idx, file_path in enumerate(input_files):
+            partitions[idx % num_mappers].append(file_path)
+
+        # Create task dictionaries
+        tasks = []
+        for task_id, input_paths in enumerate(partitions):
+            if not input_paths:
+                continue  # Skip empty partitions
+            tasks.append({
+                "task_id": task_id,
+                "input_paths": input_paths,
+                "executable": job["mapper_executable"],
+                "output_directory": os.path.join(intermediate_dir),
+                "num_partitions": num_reducers,
+            })
+        return tasks
+
+
+
+    
