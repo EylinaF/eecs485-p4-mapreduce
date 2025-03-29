@@ -3,6 +3,7 @@ import queue
 import os
 import shutil
 import logging
+from collections import defaultdict  # Add this import
 
 LOGGER = logging.getLogger(__name__)
 
@@ -112,21 +113,20 @@ class JobManager:
         part_files = defaultdict(list)
         for filename in os.listdir(intermediate_dir):
             if "-part" in filename:
-                base, partition = filename.split("-part")
-                partition_num = int(partition)
-                part_files[partition_num].append(os.path.join(intermediate_dir, filename))
+                base, partition_str = filename.split("-part")
+                partition = int(partition_str)
+                part_files[partition].append(os.path.join(intermediate_dir, filename))
 
         # Create one reduce task per partition up to num_reducers
         for partition in range(num_reducers):
-            input_paths = part_files.get(partition, [])
-            if not input_paths:
-                continue
-            reduce_tasks.append({
-                "task_id": partition,  # task_id = partition number
-                "input_paths": input_paths,
-                "executable": job["reducer_executable"],
-                "output_directory": job["output_directory"],  # Final output dir
-            })
+            input_paths = sorted(part_files.get(partition, []))
+            if input_paths:
+                reduce_tasks.append({
+                    "task_id": partition,  # task_id = partition number
+                    "input_paths": sorted(input_paths),
+                    "executable": job["reducer_executable"],
+                    "output_directory": job["output_directory"],  # Final output dir
+                })
         return reduce_tasks
 
     def cleanup_job(self, job_id):

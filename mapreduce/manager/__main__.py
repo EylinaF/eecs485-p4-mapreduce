@@ -146,7 +146,7 @@ class Manager:
                 self.current_phase = "map"  # Start with map phase
                 self._assign_tasks()
 
-        elif message_dict["message_type"] == "task_complete":
+        elif message_dict["message_type"] == "finished":
                 worker_host = message_dict["worker_host"]
                 worker_port = message_dict["worker_port"]
                 task_id = message_dict["task_id"]
@@ -165,10 +165,11 @@ class Manager:
                         for task in reduce_tasks:
                             self.pending_tasks.put(task)
                         self.current_phase = "reduce"
-                        self._assign_tasks()
                     elif self.current_phase == "reduce":
                         # Clean up intermediate directory
-                        self._handle_job_completion()
+                        self._handle_job_completion(signals)
+                self._assign_tasks()
+                    
                                         
 
         elif message_dict["message_type"] == "shutdown":
@@ -240,18 +241,35 @@ class Manager:
             else:
                 break 
 
-    def _handle_task_completion(self, worker_host, worker_port, task_id, task_type):
-        worker = (worker_host, worker_port)
-        self.worker_busy[worker] = False
-    
-        if task_type == "map":
-            self.pending_map_tasks.discard(task_id)
-            if not self.pending_map_tasks:  # All map tasks done
-                self._start_reduce_phase()
-        elif task_type == "reduce":
-            self.pending_reduce_tasks.discard(task_id)
-            if not self.pending_reduce_tasks:  # All reduce tasks done
-                self._finalize_job()
+    def _handle_job_completion(self, signals):
+        """Handle job completion and shutdown if no more jobs."""
+        if self.job_manager.current_job:
+            job_id = self.job_manager.current_job["job_id"]
+            self.job_manager.cleanup_job(job_id)
+            self.job_manager.current_job = None
+            self.current_phase = None
+
+        if not self.job_manager.job_queue.empty():
+            # Start next job
+            self.job_manager.run_job()
+            for task in self.job_manager.current_job_tasks:
+                self.pending_tasks.put(task)
+            self.current_phase = "map"
+            self._assign_tasks()
+
+        else:
+            # Send shutdown to workers
+            LOGGER.info("All jobs completed. Shutting down workers.")
+            shutdown_msg = json.dumps({"message_type": "shutdown"}).encode("utf-8")
+            for worker in self.registered_workers:
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                        sock.connect(worker)
+                        sock.sendall(shutdown_msg)
+                        LOGGER.info(f"Sent shutdown to {worker}")
+                except Exception as e:
+                    LOGGER.warning(f"Failed to send shutdown to {worker}: {e}")
+            signals["shutdown"] = True
 
     def _start_reduce_phase(self):
         """Transition from map to reduce phase."""
