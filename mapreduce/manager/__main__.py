@@ -8,7 +8,7 @@ import time
 import click
 import mapreduce.utils
 import threading
-
+from .helper import JobManager
 
 # Configure logging
 LOGGER = logging.getLogger(__name__)
@@ -34,6 +34,8 @@ class Manager:
             self.shared_dir = tmpdir
             self.host = host
             self.port = port
+            self.shared_dir = "mapreduce-shared"  # Set a shared directory
+            self.job_manager = JobManager(self.shared_dir)
             self.registered_workers = set()
             signals = {"shutdown": False}
             self.worker_states = {}
@@ -116,6 +118,11 @@ class Manager:
                                     sock.sendall(json.dumps(ack).encode("utf-8"))
                                     LOGGER.info("Sent register_ack to %s", worker)
                                 LOGGER.info("Registered Worker %s", worker)
+                        
+                        elif message_dict["message_type"] == "new_manager_job":
+                                job_id = self.job_manager.new_job_request(message_dict)
+                                LOGGER.info(f"Received new job request, assigned Job ID: {job_id}")
+                                self.job_manager.run_job()
 
                         elif message_dict["message_type"] == "shutdown":
                             LOGGER.info("Received shutdown message")
