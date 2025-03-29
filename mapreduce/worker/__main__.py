@@ -4,21 +4,18 @@ import logging
 import json
 import time
 import click
-import mapreduce.utils
 import threading
 import socket
+from pathlib import Path
 
-from mapreduce.worker.mapping import handle_map_task
-from mapreduce.worker.reducing import handle_reduce_task
+from .mapping import WorkerTasks as MapWorker
+from .reducing import WorkerTasks as ReduceWorker
 
-# Configure logging
 LOGGER = logging.getLogger(__name__)
 
-
 class Worker:
-    """A class representing a Worker node in a MapReduce cluster."""
     def __init__(self, host, port, manager_host, manager_port):
-        """Construct a Worker instance and start listening for messages."""
+        """Initialize worker with mapping and reducing capabilities."""
         LOGGER.info(
             "Starting worker host=%s port=%s pwd=%s",
             host, port, os.getcwd(),
@@ -28,92 +25,93 @@ class Worker:
             manager_host, manager_port,
         )
 
-        # This is a fake message to demonstrate pretty printing with logging
-        # message_dict = {
-        #     "message_type": "register_ack",
-        #     "worker_host": "localhost",
-        #     "worker_port": 6001,
-        # }
-        # LOGGER.debug("TCP recv\n%s", json.dumps(message_dict, indent=2))
-
-        # TODO: you should remove this. This is just so the program doesn't
-        # exit immediately!
         self.host = host
         self.port = port
         self.manager_host = manager_host
         self.manager_port = manager_port
+        
+        # Initialize task handlers
+        self.map_worker = MapWorker(host, port, manager_host, manager_port)
+        self.reduce_worker = ReduceWorker(host, port, manager_host, manager_port)
+        
         signals = {"shutdown": False, "registered": False}
-        self.threads = []
-        listener_thread = threading.Thread(target=self.start_tcp_listener, args=(signals,))
-        listener_thread.start()
-        self.threads.append(listener_thread)
+        self.threads = [
+            threading.Thread(target=self.start_tcp_listener, args=(signals,)),
+            threading.Thread(target=self.send_heartbeats, args=(signals,))
+        ]
+        
         self.register()
-        heartbeat_thread = threading.Thread(target=self.send_heartbeats, args=(signals,))
-        self.threads.append(heartbeat_thread)
-        while not signals["registered"] and not signals["shutdown"]:
-            time.sleep(0.1)
-        heartbeat_thread.start()
+        
+        for thread in self.threads:
+            thread.start()
+        
         for thread in self.threads:
             thread.join()
+        
         LOGGER.info("Worker shut down")
 
     def start_tcp_listener(self, signals):
-        """Start the TCP listener for incoming messages from Manager."""
+        """Handle incoming tasks from Manager with proper message validation."""
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind((self.host, self.port))
             sock.listen()
             sock.settimeout(1)
-            LOGGER.debug("TCP bind %s:%s", self.host, self.port)
 
             while not signals["shutdown"]:
                 try:
                     clientsocket, address = sock.accept()
                 except socket.timeout:
                     continue
-                LOGGER.debug("Connection from %s", address[0])
-                clientsocket.settimeout(1)
 
                 with clientsocket:
+                    clientsocket.settimeout(1)
                     message_chunks = []
                     while True:
                         try:
                             data = clientsocket.recv(4096)
+                            if not data:  # Connection closed
+                                break
+                            message_chunks.append(data)
                         except socket.timeout:
-                            continue
-                        if not data:
                             break
-                        message_chunks.append(data)
 
                     message_bytes = b"".join(message_chunks)
-                    if not message_bytes.strip():
-                        LOGGER.debug("Received empty TCP message, ignoring")
+                    if not message_bytes:
+                        LOGGER.debug("Received empty message, skipping")
                         continue
+
                     try:
                         message_str = message_bytes.decode("utf-8")
                         message_dict = json.loads(message_str)
                         LOGGER.debug("TCP recv\n%s", json.dumps(message_dict, indent=2))
+                    
+                        # Handle message types
                         if message_dict.get("message_type") == "shutdown":
-                            LOGGER.info("Worker received shutdown")
                             signals["shutdown"] = True
-                            return
-                        if message_dict["message_type"] == "register_ack":
+                            break  # Exit inner loop
+                        elif message_dict.get("message_type") == "register_ack":
                             signals["registered"] = True
-                            LOGGER.info("Worker received register_ack")
-                        if message_dict["message_type"] == "new_map_task":
+                        elif message_dict["message_type"] == "new_map_task":
                             threading.Thread(
-                                target=self.handle_map_task,
-                                args=(message_dict,)).start()
-                        if message_dict["message_type"] == "new_reduce_task":
+                                target=self.map_worker.handle_map_task,
+                                args=(message_dict,)
+                            ).start()
+                        elif message_dict["message_type"] == "new_reduce_task":
                             threading.Thread(
-                                target=self.handle_reduce_task,
-                                args=(message_dict,)).start()
-                    except (json.JSONDecodeError, UnicodeDecodeError) as e:
-                        LOGGER.warning("Invalid TCP message: %s", e)
-                        continue
+                                target=self.reduce_worker.handle_reduce_task,
+                                args=(message_dict,)
+                            ).start()
+
+                    except (json.JSONDecodeError, UnicodeDecodeError, KeyError) as e:
+                        LOGGER.warning("Invalid message: %s", e)
+
+                # Exit outer loop immediately after shutdown
+                if signals["shutdown"]:
+                    break
 
     def register(self):
-        """Send register message and wait for register_ack."""
+        """Register with Manager."""
         msg = {
             "message_type": "register",
             "worker_host": self.host,
@@ -122,14 +120,12 @@ class Worker:
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                 sock.connect((self.manager_host, self.manager_port))
-                sock.sendall(json.dumps(msg).encode("utf-8"))
-                LOGGER.debug("Sent Register")
+                sock.sendall(json.dumps(msg).encode())
         except Exception as e:
-            LOGGER.error("Failed to register with Manager: %s", e)
-
+            LOGGER.error("Registration failed: %s", e)
 
     def send_heartbeats(self, signals):
-        """Periodically send heartbeat messages to the Manager via UDP."""
+        """Send periodic heartbeats to Manager."""
         msg = {
             "message_type": "heartbeat",
             "worker_host": self.host,
@@ -138,13 +134,12 @@ class Worker:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             while not signals["shutdown"]:
                 try:
-                    sock.sendto(json.dumps(msg).encode("utf-8"), (self.manager_host, self.manager_port))
-                    LOGGER.debug("Sent heartbeat to Manager %s:%s", self.manager_host, self.manager_port)
+                    sock.sendto(json.dumps(msg).encode(), 
+                              (self.manager_host, self.manager_port))
                     time.sleep(1)
                 except Exception as e:
-                    LOGGER.warning("Failed to send heartbeat: %s", e)
+                    LOGGER.warning("Heartbeat failed: %s", e)
 
-    
 @click.command()
 @click.option("--host", "host", default="localhost")
 @click.option("--port", "port", default=6001)
@@ -164,7 +159,6 @@ def main(host, port, manager_host, manager_port, logfile, loglevel):
     root_logger.addHandler(handler)
     root_logger.setLevel(loglevel.upper())
     Worker(host, port, manager_host, manager_port)
-
 
 if __name__ == "__main__":
     main()

@@ -240,24 +240,29 @@ class Manager:
             else:
                 break 
 
-    def _handle_job_completion(self):
-        """Clean up and start the next job in the queue."""
-        if self.job_manager.current_job:
-            # Cleanup intermediate directory
-            job_id = self.job_manager.current_job["job_id"]
-            self.job_manager.cleanup_job(job_id)
-            # Reset current job
-            self.job_manager.current_job = None
-            self.current_phase = None
+    def _handle_task_completion(self, worker_host, worker_port, task_id, task_type):
+        worker = (worker_host, worker_port)
+        self.worker_busy[worker] = False
+    
+        if task_type == "map":
+            self.pending_map_tasks.discard(task_id)
+            if not self.pending_map_tasks:  # All map tasks done
+                self._start_reduce_phase()
+        elif task_type == "reduce":
+            self.pending_reduce_tasks.discard(task_id)
+            if not self.pending_reduce_tasks:  # All reduce tasks done
+                self._finalize_job()
 
-        # Run the next job in the queue
-        if not self.job_manager.job_queue.empty():
-            self.job_manager.run_job()
-           
-            for task in self.job_manager.current_job_tasks:
-                self.pending_tasks.put(task)
-            self.current_phase = "map"
-            self._assign_tasks()
+    def _start_reduce_phase(self):
+        """Transition from map to reduce phase."""
+        job_id = self.current_job["job_id"]
+        intermediate_dir = os.path.join(self.shared_dir, f"job-{job_id:05d}")
+        reduce_tasks = self._create_reduce_tasks(intermediate_dir)
+    
+        for task in reduce_tasks:
+            self.pending_tasks.put(task)
+        self.current_phase = "reduce"
+        self._assign_tasks()
 
 
 

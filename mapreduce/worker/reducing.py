@@ -1,67 +1,74 @@
 import subprocess
-import tempfile
-import shutil
-import heapq
 import logging
-import socket
-import json
+import heapq
 from pathlib import Path
 
 LOGGER = logging.getLogger(__name__)
 
-def handle_reduce_task(worker, task):
-    task_id = task["task_id"]
-    executable = task["executable"]
-    input_paths = [Path(p) for p in task["input_paths"]]
-    output_directory = Path(task["output_directory"])
-    output_filename = f"part-{task_id:05d}"
+class WorkerTasks:
+    def __init__(self, worker_host, worker_port, manager_host, manager_port):
+        self.host = worker_host
+        self.port = worker_port
+        self.manager_host = manager_host
+        self.manager_port = manager_port
 
-    LOGGER.info("Started reduce task %d", task_id)
+    def send_task_finished(self, task_id, task_type="reduce"):
+        """Notify Manager that a task has completed."""
+        msg = {
+            "message_type": "task_complete",
+            "task_id": task_id,
+            "worker_host": self.host,
+            "worker_port": self.port,
+            "task_type": task_type
+        }
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.connect((self.manager_host, self.manager_port))
+                sock.sendall(json.dumps(msg).encode("utf-8"))
+                LOGGER.info("Sent %s task %d completion", task_type, task_id)
+        except Exception as e:
+            LOGGER.error("Failed to send task completion: %s", e)
 
-    with tempfile.TemporaryDirectory(prefix=f"mapreduce-local-task{task_id:05d}-") as tmpdir:
-        tmpdir_path = Path(tmpdir)
-        output_path = tmpdir_path / output_filename
+    def handle_reduce_task(self, task):
+        """Execute a reduce task with proper merging and sorting."""
+        task_id = task["task_id"]
+        input_paths = task["input_paths"]
+        executable = task["executable"]
+        output_directory = Path(task["output_directory"])
 
-        file_objects = [open(p, "r") for p in input_paths]
+        LOGGER.info("Starting reduce task %d with %d input files", 
+                   task_id, len(input_paths))
 
         try:
-            merged_iter = heapq.merge(*file_objects)
-
-            with open(output_path, "w") as outfile:
+            # Create output file
+            output_file = output_directory / f"part-{task_id:05d}"
+            
+            # Open all input files
+            files = [open(path, "r") for path in input_paths]
+            
+            # Use merge-sort approach
+            with open(output_file, "w") as outfile:
+                merged = heapq.merge(*files)
+                
+                # Process through the reducer
                 with subprocess.Popen(
                     [executable],
-                    text=True,
                     stdin=subprocess.PIPE,
                     stdout=outfile,
-                ) as reduce_proc:
-                    for line in merged_iter:
-                        if reduce_proc.stdin:
-                            reduce_proc.stdin.write(line)
-                    reduce_proc.stdin.close()
-                    reduce_proc.wait()
+                    text=True,
+                ) as proc:
+                    for line in merged:
+                        proc.stdin.write(line)
+                    proc.stdin.close()
+                    proc.wait()
 
-            output_directory.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(output_path), str(output_directory / output_filename))
-
+        except Exception as e:
+            LOGGER.error("Reduce task %d failed: %s", task_id, e)
+            raise
         finally:
-            for f in file_objects:
-                f.close()
+            # Close all files
+            for f in files:
+                if hasattr(f, 'close'):
+                    f.close()
 
-    LOGGER.info("Completed reduce task %d", task_id)
-    send_task_finished(worker, task_id)
-
-def send_task_finished(worker, task_id):
-    msg = {
-        "message_type": "finished",
-        "task_id": task_id,
-        "worker_host": worker.host,
-        "worker_port": worker.port,
-    }
-
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.connect((worker.manager_host, worker.manager_port))
-            sock.sendall(json.dumps(msg).encode("utf-8"))
-            LOGGER.debug("Sent finished message for task %d", task_id)
-    except Exception as e:
-        LOGGER.error("Failed to send finished message: %s", e)
+        self.send_task_finished(task_id, "reduce")
