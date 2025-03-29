@@ -34,7 +34,7 @@ class Manager:
             self.shared_dir = tmpdir
             self.host = host
             self.port = port
-            self.shared_dir = "mapreduce-shared"  # Set a shared directory
+            
             self.job_manager = JobManager(self.shared_dir)
             self.registered_workers = set()
             signals = {"shutdown": False}
@@ -150,6 +150,7 @@ class Manager:
 @click.option("--shared_dir", "shared_dir", default=None)
 def main(host, port, logfile, loglevel, shared_dir):
     """Run Manager."""
+    print("started to run main")
     tempfile.tempdir = shared_dir
     if logfile: 
         handler = logging.FileHandler(logfile)
@@ -162,6 +163,7 @@ def main(host, port, logfile, loglevel, shared_dir):
     root_logger = logging.getLogger()
     root_logger.addHandler(handler)
     root_logger.setLevel(loglevel.upper())
+    print("ready to create manager")
     Manager(host, port)
 
 
