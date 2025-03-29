@@ -129,5 +129,12 @@ class JobManager:
             })
         return reduce_tasks
 
+    def cleanup_job(self, job_id):
+        """Delete intermediate directory for a completed job."""
+        intermediate_dir = os.path.join(self.shared_dir, f"job-{job_id:05d}")
+        if os.path.exists(intermediate_dir):
+            shutil.rmtree(intermediate_dir)
+            LOGGER.info(f"Cleaned up intermediate directory: {intermediate_dir}")
+
 
     

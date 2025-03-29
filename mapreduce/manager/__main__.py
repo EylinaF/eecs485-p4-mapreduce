@@ -95,87 +95,107 @@ class Manager:
                     continue
                 LOGGER.debug("Connection from %s", address[0])
                 clientsocket.settimeout(1)
-
                 with clientsocket:
                     message_chunks = []
                     while True:
                         try:
                             data = clientsocket.recv(4096)
+                            if not data:
+                                break
+                            message_chunks.append(data)
+                            # Attempt to parse the message
+                            message_bytes = b"".join(message_chunks)
+                            try:
+                                message_str = message_bytes.decode("utf-8")
+                                message_dict = json.loads(message_str)
+                                # Process the message
+                                self._process_message(message_dict, signals)
+                                message_chunks = []  # Reset after successful parse
+                            except json.JSONDecodeError:
+                                # Incomplete message, continue reading
+                                continue
+                            except UnicodeDecodeError as e:
+                                LOGGER.warning("Decode error: %s", e)
+                                break
                         except socket.timeout:
-                            continue
-                        if not data:
                             break
-                        message_chunks.append(data)
 
-                    message_bytes = b"".join(message_chunks)
-                    try:
-                        message_str = message_bytes.decode("utf-8")
-                        message_dict = json.loads(message_str)
-                        LOGGER.debug("TCP recv\n%s", json.dumps(message_dict, indent=2))
-                        if message_dict["message_type"] == "register":
-                                worker = (message_dict["worker_host"], message_dict["worker_port"])
-                                if worker not in self.registered_workers:
-                                        self.registered_workers.append(worker)
-                                        self.worker_busy[worker] = False
-                                ack = {"message_type": "register_ack"}
-                                LOGGER.info("Sending register_ack to %s", worker)
-                                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                                    sock.connect(worker)
-                                    sock.sendall(json.dumps(ack).encode("utf-8"))
-                                    LOGGER.info("Sent register_ack to %s", worker)
-                                LOGGER.info("Registered Worker %s", worker)
+
+    def _process_message(self, message_dict, signals):
+        """Handle a parsed JSON message."""
+        if message_dict["message_type"] == "register":
+                worker = (message_dict["worker_host"], message_dict["worker_port"])
+                if worker not in self.registered_workers:
+                        self.registered_workers.append(worker)
+                        self.worker_busy[worker] = False
+                ack = {"message_type": "register_ack"}
+                LOGGER.info("Sending register_ack to %s", worker)
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    sock.connect(worker)
+                    sock.sendall(json.dumps(ack).encode("utf-8"))
+                    LOGGER.info("Sent register_ack to %s", worker)
+                LOGGER.info("Registered Worker %s", worker)
                         
                         
-                        elif message_dict["message_type"] == "new_manager_job":
-                                job_id = self.job_manager.new_job_request(message_dict)
-                                LOGGER.info(f"Received new job, assigned Job ID: {job_id}")
-                                self.job_manager.run_job()  # Generates map tasks
-                                for task in self.job_manager.current_job_tasks:
-                                    self.pending_tasks.put(task)
-                                self.current_phase = "map"  # Start with map phase
-                                self._assign_tasks()
+        elif message_dict["message_type"] == "new_manager_job":
+                job_id = self.job_manager.new_job_request(message_dict)
+                LOGGER.info(f"Received new job, assigned Job ID: {job_id}")
+                self.job_manager.run_job()  # Generates map tasks
+                for task in self.job_manager.current_job_tasks:
+                    self.pending_tasks.put(task)
+                self.current_phase = "map"  # Start with map phase
+                self._assign_tasks()
 
-                        elif message_dict["message_type"] == "task_complete":
-                                worker_host = message_dict["worker_host"]
-                                worker_port = message_dict["worker_port"]
-                                task_id = message_dict["task_id"]
-                                worker = (worker_host, worker_port)
-                                self.worker_busy[worker] = False
-                                self.tasks_in_progress.discard(task_id)
+        elif message_dict["message_type"] == "task_complete":
+                worker_host = message_dict["worker_host"]
+                worker_port = message_dict["worker_port"]
+                task_id = message_dict["task_id"]
+                worker = (worker_host, worker_port)
+                self.worker_busy[worker] = False
+                self.tasks_in_progress.discard(task_id)
                                 
-                                if self.pending_tasks.empty() and not self.tasks_in_progress:
-                                    if self.current_phase == "map":
-                                        # Generate reduce tasks
-                                        job_id = self.job_manager.current_job["job_id"]
-                                        intermediate_dir = os.path.join(
-                                            self.shared_dir, f"job-{job_id:05d}"
-                                        )
-                                        reduce_tasks = self.job_manager.create_reduce_tasks(intermediate_dir)
-                                        for task in reduce_tasks:
-                                            self.pending_tasks.put(task)
-                                        self.current_phase = "reduce"
-                                        self._assign_tasks()
-                                    elif self.current_phase == "reduce":
-                                        LOGGER.info("Job completed")
-                                        self.job_manager.current_job = None
-                                        self.current_phase = None
+                if self.pending_tasks.empty() and not self.tasks_in_progress:
+                    if self.current_phase == "map":
+                        # Generate reduce tasks
+                        job_id = self.job_manager.current_job["job_id"]
+                        intermediate_dir = os.path.join(
+                                self.shared_dir, f"job-{job_id:05d}"
+                        )
+                        reduce_tasks = self.job_manager.create_reduce_tasks(intermediate_dir)
+                        for task in reduce_tasks:
+                            self.pending_tasks.put(task)
+                        self.current_phase = "reduce"
+                        self._assign_tasks()
+                    elif self.current_phase == "reduce":
+                        # Clean up intermediate directory
+                        self._handle_job_completion()
+                                        
 
-                        elif message_dict["message_type"] == "shutdown":
-                            LOGGER.info("Received shutdown message")
-                            shutdown_msg = json.dumps({"message_type": "shutdown"}).encode("utf-8")
-                            for host, port in self.registered_workers:
-                                try:
-                                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                                        sock.connect((host, port))
-                                        sock.sendall(shutdown_msg)
-                                        LOGGER.info("Sent shutdown to Worker %s:%s", host, port)
-                                except Exception as e:
-                                    LOGGER.warning("Failed to send shutdown to %s:%s: %s", host, port, e)
-                            signals["shutdown"] = True
-
-                    except (json.JSONDecodeError, UnicodeDecodeError) as e:
-                        LOGGER.warning("Invalid TCP message: %s", e)
-                        continue
+        elif message_dict["message_type"] == "shutdown":
+                LOGGER.info("Received shutdown message")
+    
+                # Clean up current job
+                if self.job_manager.current_job:
+                    job_id = self.job_manager.current_job["job_id"]
+                    self.job_manager.cleanup_job(job_id)
+    
+                # Clean up all queued jobs
+                while not self.job_manager.job_queue.empty():
+                    job = self.job_manager.job_queue.get()
+                    self.job_manager.cleanup_job(job["job_id"])
+    
+                # Send shutdown to workers
+                shutdown_msg = json.dumps({"message_type": "shutdown"}).encode("utf-8")
+                for host, port in self.registered_workers:
+                    try:
+                        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                            sock.connect((host, port))
+                            sock.sendall(shutdown_msg)
+                            LOGGER.info("Sent shutdown to Worker %s:%s", host, port)
+                    except Exception as e:
+                        LOGGER.warning("Failed to send shutdown to %s:%s: %s", host, port, e)
+                signals["shutdown"] = True
+                
 
     
 
@@ -219,6 +239,26 @@ class Manager:
                     break
             else:
                 break 
+
+    def _handle_job_completion(self):
+        """Clean up and start the next job in the queue."""
+        if self.job_manager.current_job:
+            # Cleanup intermediate directory
+            job_id = self.job_manager.current_job["job_id"]
+            self.job_manager.cleanup_job(job_id)
+            # Reset current job
+            self.job_manager.current_job = None
+            self.current_phase = None
+
+        # Run the next job in the queue
+        if not self.job_manager.job_queue.empty():
+            self.job_manager.run_job()
+           
+            for task in self.job_manager.current_job_tasks:
+                self.pending_tasks.put(task)
+            self.current_phase = "map"
+            self._assign_tasks()
+
 
 
 @click.command()
