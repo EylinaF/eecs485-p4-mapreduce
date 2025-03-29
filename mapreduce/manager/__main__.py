@@ -40,6 +40,7 @@ class Manager:
             self.worker_busy = {}  # { (host, port): True/False }
             self.pending_tasks = queue.Queue()
             self.tasks_in_progress = set()
+            self.current_phase = None
             signals = {"shutdown": False}
             self.threads = []
             udp_thread = threading.Thread(target=self.udp_listening, args=(signals,))
@@ -127,11 +128,11 @@ class Manager:
                         
                         elif message_dict["message_type"] == "new_manager_job":
                                 job_id = self.job_manager.new_job_request(message_dict)
-                                LOGGER.info(f"Received new job request, assigned Job ID: {job_id}")
-                                self.job_manager.run_job()  # Generates tasks
-                                # Queue all tasks for the current job
+                                LOGGER.info(f"Received new job, assigned Job ID: {job_id}")
+                                self.job_manager.run_job()  # Generates map tasks
                                 for task in self.job_manager.current_job_tasks:
                                     self.pending_tasks.put(task)
+                                self.current_phase = "map"  # Start with map phase
                                 self._assign_tasks()
 
                         elif message_dict["message_type"] == "task_complete":
@@ -139,16 +140,25 @@ class Manager:
                                 worker_port = message_dict["worker_port"]
                                 task_id = message_dict["task_id"]
                                 worker = (worker_host, worker_port)
-                                # Mark worker as available
                                 self.worker_busy[worker] = False
-                                # Remove task from in-progress set
                                 self.tasks_in_progress.discard(task_id)
-                                # Assign next tasks
-                                self._assign_tasks()
-                                # Check if job is completed
+                                
                                 if self.pending_tasks.empty() and not self.tasks_in_progress:
-                                    LOGGER.info("Current job completed")
-                                    self.job_manager.current_job = None
+                                    if self.current_phase == "map":
+                                        # Generate reduce tasks
+                                        job_id = self.job_manager.current_job["job_id"]
+                                        intermediate_dir = os.path.join(
+                                            self.shared_dir, f"job-{job_id:05d}"
+                                        )
+                                        reduce_tasks = self.job_manager.create_reduce_tasks(intermediate_dir)
+                                        for task in reduce_tasks:
+                                            self.pending_tasks.put(task)
+                                        self.current_phase = "reduce"
+                                        self._assign_tasks()
+                                    elif self.current_phase == "reduce":
+                                        LOGGER.info("Job completed")
+                                        self.job_manager.current_job = None
+                                        self.current_phase = None
 
                         elif message_dict["message_type"] == "shutdown":
                             LOGGER.info("Received shutdown message")
@@ -167,36 +177,48 @@ class Manager:
                         LOGGER.warning("Invalid TCP message: %s", e)
                         continue
 
-    def _send_task_to_worker(self, task, worker):
+    
+
+    def send_task_to_worker(self, task, worker):
+        """Send either new_map_task or new_reduce_task."""
+        # Determine message type based on task keys
+        if "num_partitions" in task:
+            message_type = "new_map_task"
+        else:
+            message_type = "new_reduce_task"
+
         message = {
-            "message_type": "new_map_task",
+            "message_type": message_type,
             "task_id": task["task_id"],
             "input_paths": task["input_paths"],
             "executable": task["executable"],
             "output_directory": task["output_directory"],
-            "num_partitions": task["num_partitions"],
         }
+        if message_type == "new_map_task":
+            message["num_partitions"] = task["num_partitions"]
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                 sock.connect(worker)
                 sock.sendall(json.dumps(message).encode("utf-8"))
                 self.worker_busy[worker] = True
                 self.tasks_in_progress.add(task["task_id"])
-                LOGGER.info(f"Sent task {task['task_id']} to {worker}")
+                LOGGER.info(f"Sent {message_type} {task['task_id']} to {worker}")
         except Exception as e:
             LOGGER.error(f"Failed to send task to {worker}: {e}")
-            self.pending_tasks.put(task)  # Requeue the task
+            self.pending_tasks.put(task)  # Requeue
+
 
     def _assign_tasks(self):
+        """Assign tasks (map or reduce) to available workers."""
         while not self.pending_tasks.empty():
-            task = self.pending_tasks.queue[0]  # Peek the next task
+            task = self.pending_tasks.queue[0]  # Peek next task
             for worker in self.registered_workers:
                 if not self.worker_busy.get(worker, False):
-                    self.pending_tasks.get()  # Remove the task from the queue
-                    self._send_task_to_worker(task, worker)
+                    self.pending_tasks.get()
+                    self.send_task_to_worker(task, worker)
                     break
             else:
-                break
+                break 
 
 
 @click.command()

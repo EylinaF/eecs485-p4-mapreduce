@@ -15,6 +15,7 @@ class JobManager:
         self.job_id_counter = 0
         self.shared_dir = shared_dir  # Directory for intermediate files
         self.current_job = None  # Keep track of running job
+        self.current_job_tasks = []
 
     def new_job_request(self, job_data):
         """
@@ -101,6 +102,32 @@ class JobManager:
             })
         return tasks
 
+    def create_reduce_tasks(self, intermediate_dir):
+        """Generate reduce tasks from map output partitions."""
+        job = self.current_job
+        num_reducers = job["num_reducers"]
+        reduce_tasks = []
+
+        # Group map output files by partition
+        part_files = defaultdict(list)
+        for filename in os.listdir(intermediate_dir):
+            if "-part" in filename:
+                base, partition = filename.split("-part")
+                partition_num = int(partition)
+                part_files[partition_num].append(os.path.join(intermediate_dir, filename))
+
+        # Create one reduce task per partition up to num_reducers
+        for partition in range(num_reducers):
+            input_paths = part_files.get(partition, [])
+            if not input_paths:
+                continue
+            reduce_tasks.append({
+                "task_id": partition,  # task_id = partition number
+                "input_paths": input_paths,
+                "executable": job["reducer_executable"],
+                "output_directory": job["output_directory"],  # Final output dir
+            })
+        return reduce_tasks
 
 
     
